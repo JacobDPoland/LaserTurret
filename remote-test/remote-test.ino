@@ -1,5 +1,6 @@
 // Arduino IR Remote Servo Controller - Snap Oscillation Mode
 // Press "1" button to toggle snap oscillation between 0% (0°) and 100% (180°)
+// Press "2" button to toggle slow oscillation at half speed (900ms per rotation)
 
 #include <Servo.h>
 #include <IRremote.h>
@@ -15,6 +16,7 @@ const uint32_t IR_SKIP_RIGHT = 0xBC43FF00;
 const uint32_t IR_PLAY_PAUSE = 0xBF40FF00;  
 const uint32_t IR_POWER = 0xBA45FF00;       
 const uint32_t IR_ONE = 0xF30CFF00;         // Triggers snap oscillation 0° <-> 180°
+const uint32_t IR_TWO = 0xE718FF00;         // Triggers slow oscillation at half speed
 
 // Servo configuration constants
 const int SERVO_MIN_ANGLE = 0;    // 0% rotation
@@ -26,8 +28,13 @@ const float LOW_BATTERY_THRESHOLD = 6.5;
 const unsigned long BATTERY_CHECK_INTERVAL = 5000;
 const unsigned long PRINT_INTERVAL = 1000;
 
-// Snap oscillation timing - position-based instead of time-based
-const unsigned long SERVO_SETTLE_TIME = 450; // Time to wait for servo to reach position (ms)
+// Oscillation timing constants
+const unsigned long SERVO_SETTLE_TIME = 450; // Time to wait for servo to reach position (ms) - full speed
+const unsigned long SERVO_SLOW_SETTLE_TIME = 900; // Time to wait for servo at half speed (ms)
+
+// Slow oscillation step control
+const int SLOW_STEP_SIZE = 2; // Degrees per step for smooth slow movement
+const int SLOW_STEP_DELAY = 10; // Milliseconds between each step (10ms * 90 steps = 900ms total)
 
 // Core servo control variables
 Servo myServo;
@@ -41,7 +48,12 @@ bool servoAttached = false;
 bool lowBatteryWarning = false;
 bool servoEnabled = true;
 bool snapOscillatingMode = false;
+bool slowOscillatingMode = false;
 bool snapPosition = true; // true = at 180°, false = at 0°
+
+// Slow oscillation variables
+int slowTargetAngle = SERVO_CENTER_ANGLE;
+unsigned long lastSlowStepTime = 0;
 
 void setup() {
   Serial.begin(9600);
@@ -70,9 +82,13 @@ void loop() {
   // Handle IR with highest priority
   handleIRRemote();
   
-  // Handle snap oscillation with highest priority during oscillation
-  if (snapOscillatingMode && servoEnabled) {
-    updateSnapOscillation();
+  // Handle oscillation modes with highest priority during oscillation
+  if ((snapOscillatingMode || slowOscillatingMode) && servoEnabled) {
+    if (snapOscillatingMode) {
+      updateSnapOscillation();
+    } else if (slowOscillatingMode) {
+      updateSlowOscillation();
+    }
     // Extra IR check during oscillation for responsiveness
     handleIRRemote(); 
   }
@@ -80,7 +96,7 @@ void loop() {
   handleSerialCommands();
   
   // Reduce status printing frequency to minimize interference
-  if (millis() - lastPrintTime >= PRINT_INTERVAL && !snapOscillatingMode) {
+  if (millis() - lastPrintTime >= PRINT_INTERVAL && !snapOscillatingMode && !slowOscillatingMode) {
     printStatusInfo();
     lastPrintTime = millis();
   }
@@ -124,6 +140,59 @@ void updateSnapOscillation() {
   }
 }
 
+void updateSlowOscillation() {
+  // Check if it's time to take the next step
+  if (millis() - lastSlowStepTime >= SLOW_STEP_DELAY) {
+    
+    // Check if we've reached the target position
+    if (currentServoAngle == slowTargetAngle) {
+      // We've reached the target, time to set a new target in the opposite direction
+      if (slowTargetAngle == SERVO_MAX_ANGLE) {
+        // Currently at 180°, next target is 0°
+        slowTargetAngle = SERVO_MIN_ANGLE;
+        snapPosition = false;
+        Serial.println(F("SLOW: Starting move 180° -> 0° (900ms)"));
+      } else {
+        // Currently at 0°, next target is 180°
+        slowTargetAngle = SERVO_MAX_ANGLE;
+        snapPosition = true;
+        Serial.println(F("SLOW: Starting move 0° -> 180° (900ms)"));
+      }
+    }
+    
+    // Move one step closer to the target
+    if (currentServoAngle < slowTargetAngle) {
+      // Moving toward higher angle
+      currentServoAngle += SLOW_STEP_SIZE;
+      if (currentServoAngle > slowTargetAngle) {
+        currentServoAngle = slowTargetAngle; // Don't overshoot
+      }
+    } else if (currentServoAngle > slowTargetAngle) {
+      // Moving toward lower angle
+      currentServoAngle -= SLOW_STEP_SIZE;
+      if (currentServoAngle < slowTargetAngle) {
+        currentServoAngle = slowTargetAngle; // Don't overshoot
+      }
+    }
+    
+    // Send the new position to the servo
+    if (servoAttached && servoEnabled) {
+      myServo.write(currentServoAngle);
+      lastSlowStepTime = millis();
+      
+      // Brief LED flash every 10 steps to show activity without being annoying
+      static int stepCounter = 0;
+      stepCounter++;
+      if (stepCounter >= 10) {
+        digitalWrite(LED_BUILTIN, HIGH);
+        delayMicroseconds(25);
+        digitalWrite(LED_BUILTIN, LOW);
+        stepCounter = 0;
+      }
+    }
+  }
+}
+
 void handleSerialCommands() {
   if (Serial.available()) {
     String command = Serial.readString();
@@ -151,10 +220,12 @@ void handleSerialCommands() {
       disableServo();
     } else if (command == "SNAP") {
       toggleSnapOscillation();
+    } else if (command == "SLOW") {
+      toggleSlowOscillation();
     } else if (command == "DEBUG") {
       debugServo();
     } else if (command.length() > 0) {
-      Serial.println(F("Commands: A## (angle 0-180), LEFT, RIGHT, CENTER, TEST, STOP, IRCODES, ENABLE, DISABLE, SNAP, DEBUG"));
+      Serial.println(F("Commands: A## (angle 0-180), LEFT, RIGHT, CENTER, TEST, STOP, IRCODES, ENABLE, DISABLE, SNAP, SLOW, DEBUG"));
     }
   }
 }
@@ -169,16 +240,28 @@ void debugServo() {
   Serial.println(currentServoAngle);
   Serial.print(F("Snap Oscillating: "));
   Serial.println(snapOscillatingMode ? "YES" : "NO");
-  if (snapOscillatingMode) {
+  Serial.print(F("Slow Oscillating: "));
+  Serial.println(slowOscillatingMode ? "YES" : "NO");
+  
+  if (snapOscillatingMode || slowOscillatingMode) {
+    if (slowOscillatingMode) {
+      Serial.print(F("Current Target: "));
+      Serial.print(slowTargetAngle);
+      Serial.println(F("°"));
+      Serial.print(F("Steps Remaining: "));
+      Serial.println(abs(currentServoAngle - slowTargetAngle) / SLOW_STEP_SIZE);
+    }
     Serial.print(F("Current Position: "));
     Serial.println(snapPosition ? "180° (100%)" : "0° (0%)");
-    Serial.print(F("Next Snap In: "));
-    unsigned long timeLeft = SERVO_SETTLE_TIME - (millis() - lastServoCommand);
-    if (servoMoving && timeLeft > 0) {
-      Serial.print(timeLeft);
-      Serial.println(F(" ms (waiting for servo)"));
-    } else {
-      Serial.println(F("Ready to snap"));
+    if (snapOscillatingMode) {
+      Serial.print(F("Next Move In: "));
+      unsigned long timeLeft = SERVO_SETTLE_TIME - (millis() - lastServoCommand);
+      if (servoMoving && timeLeft > 0) {
+        Serial.print(timeLeft);
+        Serial.println(F(" ms (fast mode)"));
+      } else {
+        Serial.println(F("Ready to move"));
+      }
     }
   }
   Serial.println(F("Forcing servo write..."));
@@ -199,10 +282,11 @@ void setServoAngle(int angle) {
   }
   
   if (angle >= SERVO_MIN_ANGLE && angle <= SERVO_MAX_ANGLE) {
-    // Stop snap oscillation when manually setting position
-    if (snapOscillatingMode) {
+    // Stop any oscillation when manually setting position
+    if (snapOscillatingMode || slowOscillatingMode) {
       snapOscillatingMode = false;
-      Serial.println(F("Snap oscillation mode stopped"));
+      slowOscillatingMode = false;
+      Serial.println(F("Oscillation mode stopped"));
     }
     
     currentServoAngle = angle;
@@ -254,7 +338,7 @@ void handleIRRemote() {
     }
     
     // Show IR codes only when not oscillating to reduce serial spam
-    if (receivedCode != 0x0 && !snapOscillatingMode) {
+    if (receivedCode != 0x0 && !snapOscillatingMode && !slowOscillatingMode) {
       Serial.print(F("IR Code: 0x"));
       Serial.println(receivedCode, HEX);
     }
@@ -290,8 +374,14 @@ void handleIRRemote() {
         lastIRCommand = millis();
         break;
         
+      case IR_TWO:
+        Serial.println(F("IR: 2 - Toggling SLOW oscillation (0° <-> 180° at half speed)"));
+        toggleSlowOscillation();
+        lastIRCommand = millis();
+        break;
+        
       default:
-        if (receivedCode != 0x0 && !snapOscillatingMode) {
+        if (receivedCode != 0x0 && !snapOscillatingMode && !slowOscillatingMode) {
           Serial.print(F("IR: Unknown code 0x"));
           Serial.println(receivedCode, HEX);
         }
@@ -306,6 +396,12 @@ void toggleSnapOscillation() {
   if (!servoEnabled) {
     Serial.println(F("Servo is disabled - cannot oscillate"));
     return;
+  }
+  
+  // Stop slow oscillation if it's running
+  if (slowOscillatingMode) {
+    slowOscillatingMode = false;
+    Serial.println(F("Slow oscillation stopped"));
   }
   
   if (snapOscillatingMode) {
@@ -338,8 +434,53 @@ void toggleSnapOscillation() {
       lastServoCommand = millis();
     }
     
-    Serial.println(F("Position-based snapping - servo snaps when it reaches target"));
+    Serial.println(F("Fast oscillation - 450ms per rotation"));
     flashLED(4, 100);
+  }
+}
+
+void toggleSlowOscillation() {
+  if (!servoEnabled) {
+    Serial.println(F("Servo is disabled - cannot oscillate"));
+    return;
+  }
+  
+  // Stop snap oscillation if it's running
+  if (snapOscillatingMode) {
+    snapOscillatingMode = false;
+    Serial.println(F("Snap oscillation stopped"));
+  }
+  
+  if (slowOscillatingMode) {
+    slowOscillatingMode = false;
+    Serial.println(F("SLOW OSCILLATION MODE OFF - Servo will hold current position"));
+    Serial.print(F("Current position: "));
+    Serial.print(currentServoAngle);
+    Serial.println(F("°"));
+    flashLED(2, 400); // Longer flash for slow mode
+  } else {
+    slowOscillatingMode = true;
+    
+    // Determine starting position and target based on current angle
+    if (currentServoAngle >= SERVO_CENTER_ANGLE) {
+      // Start moving toward 0° from current position
+      slowTargetAngle = SERVO_MIN_ANGLE;
+      snapPosition = false;
+      Serial.println(F("SLOW OSCILLATION MODE ON - Moving toward 0°"));
+    } else {
+      // Start moving toward 180° from current position
+      slowTargetAngle = SERVO_MAX_ANGLE;
+      snapPosition = true;
+      Serial.println(F("SLOW OSCILLATION MODE ON - Moving toward 180°"));
+    }
+    
+    // Initialize timing
+    lastSlowStepTime = millis();
+    
+    Serial.print(F("Smooth slow oscillation - 2° steps every 10ms ("));
+    Serial.print((180 / SLOW_STEP_SIZE) * SLOW_STEP_DELAY);
+    Serial.println(F("ms per full rotation)"));
+    flashLED(6, 100); // More flashes for slow mode
   }
 }
 
@@ -360,6 +501,7 @@ void enableServo() {
     }
     
     snapOscillatingMode = false;
+    slowOscillatingMode = false;
     servoMoving = false;
     currentServoAngle = SERVO_CENTER_ANGLE;
     myServo.write(SERVO_CENTER_ANGLE);
@@ -375,6 +517,7 @@ void disableServo() {
   if (servoEnabled) {
     servoEnabled = false;
     snapOscillatingMode = false;
+    slowOscillatingMode = false;
     servoMoving = false;
     
     if (servoAttached) {
@@ -396,6 +539,7 @@ void printIRCodes() {
   Serial.println(F("Play/Pause:  0xBF40FF00 (Servo to 90°)"));
   Serial.println(F("Power:       0xBA45FF00 (Toggle Enable/Disable)"));
   Serial.println(F("1:           0xF30CFF00 (Toggle SNAP Oscillation 0°<->180°)"));
+  Serial.println(F("2:           0xE718FF00 (Toggle SLOW Oscillation 0°<->180° - Half Speed)"));
   Serial.println(F("========================"));
 }
 
@@ -423,6 +567,9 @@ void printStatusInfo() {
     Serial.print(F("DISABLED"));
   } else if (snapOscillatingMode) {
     Serial.print(F("SNAP OSCILLATING "));
+    Serial.print(snapPosition ? "180°" : "0°");
+  } else if (slowOscillatingMode) {
+    Serial.print(F("SLOW OSCILLATING "));
     Serial.print(snapPosition ? "180°" : "0°");
   } else {
     Serial.print(F("HOLDING"));
@@ -469,7 +616,9 @@ void testServo() {
   Serial.println(F("=== SERVO POSITION TEST ==="));
   
   bool wasSnapping = snapOscillatingMode;
+  bool wasSlow = slowOscillatingMode;
   snapOscillatingMode = false;
+  slowOscillatingMode = false;
   
   flashLED(3, 100);
   
@@ -488,6 +637,9 @@ void testServo() {
   if (wasSnapping) {
     snapOscillatingMode = true;
     Serial.println(F("Snap oscillation restored"));
+  } else if (wasSlow) {
+    slowOscillatingMode = true;
+    Serial.println(F("Slow oscillation restored"));
   }
   
   Serial.println(F("=== TEST COMPLETE ==="));
@@ -496,10 +648,11 @@ void testServo() {
 
 void printStartupInfo() {
   Serial.println(F("====================================="));
-  Serial.println(F("IR Remote Servo Controller - SNAP MODE"));
-  Serial.println(F("Press '1' for 0°<->180° Snap Oscillation"));
+  Serial.println(F("IR Remote Servo Controller - Enhanced"));
+  Serial.println(F("Press '1' for Fast Oscillation (450ms)"));
+  Serial.println(F("Press '2' for Slow Oscillation (900ms)"));
   Serial.println(F("====================================="));
-  Serial.println(F("Commands: LEFT, RIGHT, CENTER, SNAP, DEBUG"));
+  Serial.println(F("Commands: LEFT, RIGHT, CENTER, SNAP, SLOW, DEBUG"));
   Serial.println(F("Default: 90° (CENTER position)"));
   Serial.println(F("====================================="));
 }
