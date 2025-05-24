@@ -41,7 +41,7 @@ bool servoAttached = false;
 bool lowBatteryWarning = false;
 
 void setup() {
-  Serial.begin(115200); // Increased baud rate for faster serial communication
+  Serial.begin(9600); // Restored original baud rate for stable communication
   pinMode(SW_PIN, INPUT_PULLUP);
   pinMode(LED_BUILTIN, OUTPUT);
   
@@ -374,7 +374,7 @@ void printStartupInfo() {
   Serial.println(F("Mode: MAXIMUM SPEED"));
   Serial.println(F("- Direct positioning"));
   Serial.println(F("- No movement delays"));
-  Serial.println(F("- 115200 baud rate"));
+  Serial.println(F("- 9600 baud rate"));
   Serial.println(F("Commands: S##, T##, CAL, TEST, STOP, MAXSPEED"));
   Serial.println(F("====================================="));
 }
