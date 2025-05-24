@@ -1,71 +1,58 @@
-// Arduino Joystick Servo Controller - Maximum Speed Version with IR Remote
-// Controls a servo motor at maximum speed using joystick left/right movement OR IR remote
-// Up, down, and button inputs are ignored for safety
-// Optimized for fastest possible servo response
-// IR Remote: Skip Left/Right buttons control servo
+// Arduino IR Remote Servo Controller - Position Hold Version
+// Controls a servo motor using IR remote only
+// Servo holds position until new command is received
+// Default position is 50% rotation (90°)
 
 #include <Servo.h>
 #include <IRremote.h>
 
 // Pin definitions (using const to store in flash memory)
-const int VRX_PIN = A0;
-const int VRY_PIN = A1;
-const int SW_PIN = 2;
 const int SERVO_PIN = 9;
 const int BATTERY_PIN = A7;
 const int IR_RECEIVE_PIN = 12;
 
 // IR Remote button codes for Elegoo small remote
-const uint32_t IR_SKIP_LEFT = 0xBB44FF00;   // Skip Left button
-const uint32_t IR_SKIP_RIGHT = 0xBC43FF00;  // Skip Right button
-const uint32_t IR_PLAY_PAUSE = 0xBF40FF00;  // Play/Pause (for center position)
-const uint32_t IR_POWER = 0xBA45FF00;       // Power button (emergency stop)
-
-// Joystick configuration constants
-const int CENTER_X = 512;
-const int CENTER_Y = 512;
-const int DEADZONE = 50;
-const int THRESHOLD = 200;
+const uint32_t IR_SKIP_LEFT = 0xBB44FF00;   // Skip Left button (move to 180°)
+const uint32_t IR_SKIP_RIGHT = 0xBC43FF00;  // Skip Right button (move to 0°)
+const uint32_t IR_PLAY_PAUSE = 0xBF40FF00;  // Play/Pause (center to 90°)
+const uint32_t IR_POWER = 0xBA45FF00;       // Power button (toggle enable/disable)
 
 // Servo configuration constants
 const int SERVO_MIN_ANGLE = 0;
 const int SERVO_MAX_ANGLE = 180;
-const int SERVO_CENTER_ANGLE = 90;
+const int SERVO_CENTER_ANGLE = 90;  // 50% position (default)
 
 // Battery monitoring constants
 const float LOW_BATTERY_THRESHOLD = 6.5;
 const unsigned long BATTERY_CHECK_INTERVAL = 5000;
 const unsigned long PRINT_INTERVAL = 500; // Reduced frequency to not slow down servo
 
-// Core servo control variables (optimized for speed)
+// Core servo control variables
 Servo myServo;
-int currentServoAngle = SERVO_CENTER_ANGLE;
-int targetServoAngle = SERVO_CENTER_ANGLE;
-int servoSpeed = 100;        // Always at maximum
-int servoStepSize = 180;     // Maximum step size for instant movement
-unsigned long lastServoUpdate = 0;
+int currentServoAngle = SERVO_CENTER_ANGLE;  // Start at 50% position
 unsigned long lastBatteryCheck = 0;
 unsigned long lastPrintTime = 0;
 unsigned long lastIRCommand = 0;
 bool servoAttached = false;
 bool lowBatteryWarning = false;
-bool irControlActive = false;
+bool servoEnabled = true;
 
 void setup() {
-  Serial.begin(9600); // Restored original baud rate for stable communication
-  pinMode(SW_PIN, INPUT_PULLUP);
+  Serial.begin(9600);
   pinMode(LED_BUILTIN, OUTPUT);
   
-  // Initialize IR receiver (new library syntax)
+  // Initialize IR receiver
   IrReceiver.begin(IR_RECEIVE_PIN, ENABLE_LED_FEEDBACK);
   Serial.print(F("IR Remote receiver initialized on pin "));
   Serial.println(IR_RECEIVE_PIN);
   
-  // Initialize servo
+  // Initialize servo at center position (50%)
   myServo.attach(SERVO_PIN);
   servoAttached = true;
+  servoEnabled = true;
   myServo.write(SERVO_CENTER_ANGLE);
-  delay(500); // Reduced startup delay
+  currentServoAngle = SERVO_CENTER_ANGLE;
+  delay(500);
   
   // Startup sequence
   printStartupInfo();
@@ -76,21 +63,9 @@ void loop() {
   handleSerialCommands();
   handleIRRemote();
   
-  // Read joystick and process movement (only if IR not recently used)
-  if (!irControlActive || (millis() - lastIRCommand > 2000)) {
-    int xValue = analogRead(VRX_PIN);
-    int yValue = analogRead(VRY_PIN);
-    bool buttonPressed = !digitalRead(SW_PIN);
-    
-    processJoystickMovement(xValue, yValue, buttonPressed);
-  }
-  
-  updateServoPosition();
-  
-  // Periodic tasks (less frequent to not slow down servo)
+  // Periodic tasks
   if (millis() - lastPrintTime >= PRINT_INTERVAL) {
-    int xValue = analogRead(VRX_PIN);
-    printStatusInfo(xValue);
+    printStatusInfo();
     lastPrintTime = millis();
   }
   
@@ -100,7 +75,6 @@ void loop() {
   }
   
   enforceServoSafety();
-  // Removed delay(10) for maximum speed - no artificial delays
 }
 
 void handleSerialCommands() {
@@ -109,98 +83,64 @@ void handleSerialCommands() {
     command.trim();
     command.toUpperCase();
     
-    if (command.startsWith("S")) {
-      int speed = command.substring(1).toInt();
-      setServoSpeed(speed);
-    } else if (command.startsWith("T")) {
-      int stepSize = command.substring(1).toInt();
-      setServoStepSize(stepSize);
-    } else if (command == "CAL") {
-      calibrateJoystick();
+    if (command.startsWith("A")) {
+      int angle = command.substring(1).toInt();
+      setServoAngle(angle);
+    } else if (command == "LEFT") {
+      moveServoLeft();
+    } else if (command == "RIGHT") {
+      moveServoRight();
+    } else if (command == "CENTER") {
+      moveServoCenter();
     } else if (command == "TEST") {
       testServo();
     } else if (command == "STOP") {
       emergencyStop();
-    } else if (command == "MAXSPEED") {
-      setMaximumSpeed();
     } else if (command == "IRCODES") {
       printIRCodes();
+    } else if (command == "ENABLE") {
+      enableServo();
+    } else if (command == "DISABLE") {
+      disableServo();
     } else if (command.length() > 0) {
-      Serial.println(F("Commands: S## (speed 1-100), T## (step 1-180), CAL, TEST, STOP, MAXSPEED, IRCODES"));
+      Serial.println(F("Commands: A## (angle 0-180), LEFT, RIGHT, CENTER, TEST, STOP, IRCODES, ENABLE, DISABLE"));
     }
   }
 }
 
-void processJoystickMovement(int xValue, int yValue, bool buttonPressed) {
-  int xRelative = xValue - CENTER_X;
-  int yRelative = yValue - CENTER_Y;
-  
-  bool moveLeft = false;
-  bool moveRight = false;
-  bool moveUp = false;
-  bool moveDown = false;
-  
-  // Process X-axis (active for servo control) - Direct position mapping for speed
-  if (abs(xRelative) > DEADZONE) {
-    if (xRelative > THRESHOLD) {
-      moveRight = true;
-      // For maximum speed, jump directly to target position
-      targetServoAngle = SERVO_MIN_ANGLE; // Full right
-    } else if (xRelative < -THRESHOLD) {
-      moveLeft = true;
-      // For maximum speed, jump directly to target position  
-      targetServoAngle = SERVO_MAX_ANGLE; // Full left
-    }
-  } else {
-    // Return to center when joystick is centered
-    targetServoAngle = SERVO_CENTER_ANGLE;
+void setServoAngle(int angle) {
+  if (!servoEnabled) {
+    Serial.println(F("Servo is disabled"));
+    return;
   }
   
-  // Check Y-axis (disabled for safety)
-  if (abs(yRelative) > DEADZONE) {
-    if (yRelative > THRESHOLD) moveDown = true;
-    else if (yRelative < -THRESHOLD) moveUp = true;
-  }
-  
-  // Log disabled inputs (less frequently to not slow down)
-  if (moveUp || moveDown || buttonPressed) {
-    logDisabledInputs(moveUp, moveDown, buttonPressed);
-  }
-}
-
-void updateServoPosition() {
-  // Remove all delays and update servo immediately for maximum speed
-  if (currentServoAngle != targetServoAngle) {
-    // For maximum speed, jump directly to target instead of gradual movement
-    currentServoAngle = targetServoAngle;
-    
+  if (angle >= SERVO_MIN_ANGLE && angle <= SERVO_MAX_ANGLE) {
+    currentServoAngle = angle;
     if (servoAttached) {
       myServo.write(currentServoAngle);
     }
-    lastServoUpdate = millis();
+    Serial.print(F("Servo moved to "));
+    Serial.print(currentServoAngle);
+    Serial.println(F("°"));
+    flashLED(1, 100);
+  } else {
+    Serial.println(F("Invalid angle! Use 0-180"));
   }
 }
 
-void setServoSpeed(int speed) {
-  if (speed >= 1 && speed <= 100) {
-    servoSpeed = speed;
-    Serial.print(F("Speed set to: "));
-    Serial.print(servoSpeed);
-    Serial.println(F("/100 (Note: Max speed mode active)"));
-  } else {
-    Serial.println(F("Invalid speed! Use 1-100"));
-  }
+void moveServoLeft() {
+  Serial.println(F("Moving servo to LEFT (180°)"));
+  setServoAngle(SERVO_MAX_ANGLE);
 }
 
-void setServoStepSize(int stepSize) {
-  if (stepSize >= 1 && stepSize <= 180) {
-    servoStepSize = stepSize;
-    Serial.print(F("Step size set to: "));
-    Serial.print(servoStepSize);
-    Serial.println(F("° (Note: Direct positioning mode active)"));
-  } else {
-    Serial.println(F("Invalid step size! Use 1-180"));
-  }
+void moveServoRight() {
+  Serial.println(F("Moving servo to RIGHT (0°)"));
+  setServoAngle(SERVO_MIN_ANGLE);
+}
+
+void moveServoCenter() {
+  Serial.println(F("Moving servo to CENTER (90°)"));
+  setServoAngle(SERVO_CENTER_ANGLE);
 }
 
 void handleIRRemote() {
@@ -219,32 +159,27 @@ void handleIRRemote() {
     
     switch (receivedCode) {
       case IR_SKIP_LEFT:
-        Serial.println(F("IR: Skip Left - Moving servo to MAX (180°)"));
-        targetServoAngle = SERVO_MAX_ANGLE;
-        irControlActive = true;
+        Serial.println(F("IR: Skip Left - Moving servo to LEFT (180°)"));
+        moveServoLeft();
         lastIRCommand = millis();
-        flashLED(1, 50);
         break;
         
       case IR_SKIP_RIGHT:
-        Serial.println(F("IR: Skip Right - Moving servo to MIN (0°)"));
-        targetServoAngle = SERVO_MIN_ANGLE;
-        irControlActive = true;
+        Serial.println(F("IR: Skip Right - Moving servo to RIGHT (0°)"));
+        moveServoRight();
         lastIRCommand = millis();
-        flashLED(1, 50);
         break;
         
       case IR_PLAY_PAUSE:
-        Serial.println(F("IR: Play/Pause - Centering servo (90°)"));
-        targetServoAngle = SERVO_CENTER_ANGLE;
-        irControlActive = true;
+        Serial.println(F("IR: Play/Pause - Moving servo to CENTER (90°)"));
+        moveServoCenter();
         lastIRCommand = millis();
-        flashLED(2, 100);
         break;
         
       case IR_POWER:
-        Serial.println(F("IR: Power - Emergency Stop!"));
-        emergencyStop();
+        Serial.println(F("IR: Power - Toggling servo enable/disable"));
+        toggleServo();
+        lastIRCommand = millis();
         break;
         
       default:
@@ -257,23 +192,54 @@ void handleIRRemote() {
   }
 }
 
-void setMaximumSpeed() {
-  servoSpeed = 100;
-  servoStepSize = 180;
-  Serial.println(F("MAXIMUM SPEED MODE ACTIVATED!"));
-  Serial.println(F("- Speed: 100/100"));
-  Serial.println(F("- Step: 180° (full range)"));
-  Serial.println(F("- Direct positioning enabled"));
-  Serial.println(F("- All delays removed"));
-  flashLED(5, 50);
+void toggleServo() {
+  if (servoEnabled) {
+    disableServo();
+  } else {
+    enableServo();
+  }
+}
+
+void enableServo() {
+  if (!servoEnabled) {
+    servoEnabled = true;
+    if (!servoAttached) {
+      myServo.attach(SERVO_PIN);
+      servoAttached = true;
+    }
+    // Return to center position (50%) when re-enabling
+    currentServoAngle = SERVO_CENTER_ANGLE;
+    myServo.write(SERVO_CENTER_ANGLE);
+    
+    Serial.println(F("SERVO ENABLED - Position: 90° (50%)"));
+    flashLED(3, 100); // 3 quick flashes for enable
+  } else {
+    Serial.println(F("Servo already enabled"));
+  }
+}
+
+void disableServo() {
+  if (servoEnabled) {
+    servoEnabled = false;
+    // Detach servo to save power and prevent jitter
+    if (servoAttached) {
+      myServo.detach();
+      servoAttached = false;
+    }
+    
+    Serial.println(F("SERVO DISABLED"));
+    flashLED(5, 200); // 5 slower flashes for disable
+  } else {
+    Serial.println(F("Servo already disabled"));
+  }
 }
 
 void printIRCodes() {
   Serial.println(F("=== IR REMOTE CODES ==="));
-  Serial.println(F("Skip Left:   0xFF22DD (Servo to 180°)"));
-  Serial.println(F("Skip Right:  0xFFC23D (Servo to 0°)"));
-  Serial.println(F("Play/Pause:  0xFF02FD (Servo to 90°)"));
-  Serial.println(F("Power:       0xFFA25D (Emergency Stop)"));
+  Serial.println(F("Skip Left:   0xBB44FF00 (Servo to 180°)"));
+  Serial.println(F("Skip Right:  0xBC43FF00 (Servo to 0°)"));
+  Serial.println(F("Play/Pause:  0xBF40FF00 (Servo to 90°)"));
+  Serial.println(F("Power:       0xBA45FF00 (Toggle Enable/Disable)"));
   Serial.println(F("========================"));
   Serial.println(F("Point remote at IR sensor on pin 12"));
   Serial.println(F("If codes don't match, use IRCODES command"));
@@ -281,10 +247,14 @@ void printIRCodes() {
 }
 
 void enforceServoSafety() {
-  currentServoAngle = constrain(currentServoAngle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
-  targetServoAngle = constrain(targetServoAngle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+  // Only enforce safety if servo is enabled
+  if (!servoEnabled) {
+    return;
+  }
   
-  if (!servoAttached) {
+  currentServoAngle = constrain(currentServoAngle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+  
+  if (!servoAttached && servoEnabled) {
     Serial.println(F("WARNING: Servo not attached! Reattaching..."));
     flashLED(10, 25); // Faster LED flash
     myServo.attach(SERVO_PIN);
@@ -292,41 +262,23 @@ void enforceServoSafety() {
   }
 }
 
-void logDisabledInputs(bool moveUp, bool moveDown, bool buttonPressed) {
-  static unsigned long lastWarningTime = 0;
-  unsigned long currentTime = millis();
-  
-  // Reduced warning frequency to not slow down main loop
-  if (currentTime - lastWarningTime >= 3000) {
-    if (moveUp) Serial.println(F("INFO: UP disabled"));
-    if (moveDown) Serial.println(F("INFO: DOWN disabled"));
-    if (buttonPressed) Serial.println(F("INFO: Button disabled"));
-    
-    // Quick LED flash without delay
-    digitalWrite(LED_BUILTIN, HIGH);
-    delayMicroseconds(10000); // 10ms in microseconds for precision
-    digitalWrite(LED_BUILTIN, LOW);
-    lastWarningTime = currentTime;
-  }
-}
-
-void printStatusInfo(int xValue) {
-  Serial.print(F("X:"));
-  Serial.print(xValue);
-  Serial.print(F(" Servo:"));
+void printStatusInfo() {
+  Serial.print(F("Servo Position: "));
   Serial.print(currentServoAngle);
-  Serial.print(F("° Target:"));
-  Serial.print(targetServoAngle);
-  Serial.print(F("° [MAX SPEED"));
-  if (irControlActive && (millis() - lastIRCommand < 2000)) {
-    Serial.print(F(" + IR"));
-  }
-  Serial.print(F("] Range:"));
+  Serial.print(F("° ("));
   
   float servoPercent = ((float)(currentServoAngle - SERVO_MIN_ANGLE) / 
                        (SERVO_MAX_ANGLE - SERVO_MIN_ANGLE)) * 100;
   Serial.print(servoPercent, 1);
-  Serial.println(F("%"));
+  Serial.print(F("%) ["));
+  
+  if (!servoEnabled) {
+    Serial.print(F("DISABLED"));
+  } else {
+    Serial.print(F("ENABLED - HOLDING"));
+  }
+  
+  Serial.println(F("]"));
 }
 
 void checkBatteryVoltage() {
@@ -366,90 +318,29 @@ void emergencyStop() {
   }
 }
 
-void calibrateJoystick() {
-  Serial.println(F("=== JOYSTICK CALIBRATION ==="));
-  Serial.println(F("Center joystick for 2 seconds...")); // Reduced time
-  
-  flashLED(3, 100); // Fewer flashes
-  
-  for (int i = 2; i > 0; i--) { // Reduced countdown
-    Serial.print(i);
-    Serial.println(F("..."));
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(400); // Faster countdown
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(100);
-  }
-  
-  long xSum = 0, ySum = 0;
-  const int samples = 50; // Fewer samples for speed
-  
-  Serial.println(F("Sampling..."));
-  for (int i = 0; i < samples; i++) {
-    xSum += analogRead(VRX_PIN);
-    ySum += analogRead(VRY_PIN);
-    if (i % 5 == 0) { // Faster LED update
-      digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-    }
-    delay(5); // Faster sampling
-  }
-  
-  int centerX = xSum / samples;
-  int centerY = ySum / samples;
-  
-  Serial.println(F("=== RESULTS ==="));
-  Serial.print(F("Measured X: "));
-  Serial.println(centerX);
-  Serial.print(F("Measured Y: "));
-  Serial.println(centerY);
-  Serial.print(F("Current X: "));
-  Serial.println(CENTER_X);
-  Serial.print(F("Current Y: "));
-  Serial.println(CENTER_Y);
-  
-  if (abs(centerX - CENTER_X) > 20 || abs(centerY - CENTER_Y) > 20) {
-    Serial.println(F("Update CENTER_X and CENTER_Y constants"));
-  } else {
-    Serial.println(F("Calibration is good!"));
-  }
-  
-  digitalWrite(LED_BUILTIN, HIGH);
-  delay(1000);
-  digitalWrite(LED_BUILTIN, LOW);
-}
-
 void testServo() {
-  Serial.println(F("=== SERVO SPEED TEST ==="));
+  Serial.println(F("=== SERVO POSITION TEST ==="));
   flashLED(3, 100);
   
   unsigned long startTime = millis();
   
-  // Quick sweep to max (larger steps for speed)
-  for (int angle = SERVO_CENTER_ANGLE; angle <= SERVO_MAX_ANGLE; angle += 10) {
-    myServo.write(angle);
-    currentServoAngle = angle;
-    delay(20); // Minimal delay
-  }
+  // Test all three positions
+  Serial.println(F("Testing RIGHT (0°)..."));
+  moveServoRight();
+  delay(1000);
   
-  // Quick sweep to min
-  for (int angle = SERVO_MAX_ANGLE; angle >= SERVO_MIN_ANGLE; angle -= 10) {
-    myServo.write(angle);
-    currentServoAngle = angle;
-    delay(20); // Minimal delay
-  }
+  Serial.println(F("Testing LEFT (180°)..."));
+  moveServoLeft();
+  delay(1000);
   
-  // Quick return to center
-  for (int angle = SERVO_MIN_ANGLE; angle <= SERVO_CENTER_ANGLE; angle += 10) {
-    myServo.write(angle);
-    currentServoAngle = angle;
-    delay(20); // Minimal delay
-  }
+  Serial.println(F("Testing CENTER (90°)..."));
+  moveServoCenter();
+  delay(1000);
   
   unsigned long endTime = millis();
-  targetServoAngle = SERVO_CENTER_ANGLE;
   
-  Serial.println(F("=== SPEED TEST COMPLETE ==="));
-  Serial.print(F("Full sweep time: "));
+  Serial.println(F("=== TEST COMPLETE ==="));
+  Serial.print(F("Test duration: "));
   Serial.print(endTime - startTime);
   Serial.println(F("ms"));
   
@@ -460,18 +351,21 @@ void testServo() {
 
 void printStartupInfo() {
   Serial.println(F("====================================="));
-  Serial.println(F("Servo Controller - MAX SPEED + IR!"));
+  Serial.println(F("IR Remote Servo Controller"));
+  Serial.println(F("Position Hold Mode"));
   Serial.println(F("====================================="));
-  Serial.println(F("JOYSTICK:"));
-  Serial.println(F("  LEFT/RIGHT: Move servo (INSTANT)"));
-  Serial.println(F("  UP/DOWN/BUTTON: Disabled"));
   Serial.println(F("IR REMOTE (Pin 12):"));
-  Serial.println(F("  Skip Left:  Servo to 180°"));
-  Serial.println(F("  Skip Right: Servo to 0°"));
-  Serial.println(F("  Play/Pause: Servo to 90°"));
-  Serial.println(F("  Power:      Emergency Stop"));
-  Serial.println(F("Mode: MAXIMUM SPEED"));
-  Serial.println(F("Commands: S##, T##, CAL, TEST, STOP, MAXSPEED, IRCODES"));
+  Serial.println(F("  Skip Left:  Move to 180° (LEFT)"));
+  Serial.println(F("  Skip Right: Move to 0° (RIGHT)"));
+  Serial.println(F("  Play/Pause: Move to 90° (CENTER)"));
+  Serial.println(F("  Power:      Toggle Enable/Disable"));
+  Serial.println(F(""));
+  Serial.println(F("SERIAL COMMANDS:"));
+  Serial.println(F("  A## - Move to angle (0-180°)"));
+  Serial.println(F("  LEFT, RIGHT, CENTER - Quick positions"));
+  Serial.println(F("  ENABLE, DISABLE - Toggle servo"));
+  Serial.println(F("Default: 90° (50% rotation)"));
+  Serial.println(F("Mode: Position Hold - Stays until moved"));
   Serial.println(F("====================================="));
 }
 
