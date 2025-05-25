@@ -1,6 +1,7 @@
-// Arduino IR Remote Servo Controller - Snap Oscillation Mode
+// Arduino IR Remote Servo Controller - Sine Wave Oscillation Mode
 // Press "1" button to toggle snap oscillation between 0% (0°) and 100% (180°)
 // Press "2" button to toggle slow oscillation at half speed (900ms per rotation)
+// Press "3" button to toggle sine wave oscillation with smooth motion
 
 #include <Servo.h>
 #include <IRremote.h>
@@ -17,6 +18,7 @@ const uint32_t IR_PLAY_PAUSE = 0xBF40FF00;
 const uint32_t IR_POWER = 0xBA45FF00;       
 const uint32_t IR_ONE = 0xF30CFF00;         // Triggers snap oscillation 0° <-> 180°
 const uint32_t IR_TWO = 0xE718FF00;         // Triggers slow oscillation at half speed
+const uint32_t IR_THREE = 0xA15EFF00;       // Triggers sine wave oscillation
 
 // Servo configuration constants
 const int SERVO_MIN_ANGLE = 0;    // 0% rotation
@@ -36,6 +38,12 @@ const unsigned long SERVO_SLOW_SETTLE_TIME = 927; // Time to wait for servo at h
 const int SLOW_STEP_SIZE = 2; // Degrees per step for smooth slow movement
 const int SLOW_STEP_DELAY = 10; // Milliseconds between each step (10ms * 90 steps = 900ms total)
 
+// Sine wave oscillation constants
+const unsigned long SINE_UPDATE_INTERVAL = 20; // Update servo position every 20ms for smooth motion
+const float SINE_FREQUENCY = 0.5; // Oscillations per second (adjustable)
+const int SINE_AMPLITUDE = 90; // Maximum deviation from center (90° = full range 0-180°)
+const int SINE_CENTER = 90; // Center position for sine wave
+
 // Core servo control variables
 Servo myServo;
 int currentServoAngle = SERVO_CENTER_ANGLE;
@@ -49,12 +57,19 @@ bool lowBatteryWarning = false;
 bool servoEnabled = true;
 bool snapOscillatingMode = false;
 bool slowOscillatingMode = false;
+bool sineOscillatingMode = false;
 bool snapPosition = true; // true = at 180°, false = at 0°
 
 // Slow oscillation variables
 int slowTargetAngle = SERVO_CENTER_ANGLE;
 unsigned long lastSlowStepTime = 0;
 unsigned long lastDirChange = 0;
+
+// Sine wave oscillation variables
+unsigned long sineStartTime = 0;
+unsigned long lastSineUpdate = 0;
+float sineFrequency = SINE_FREQUENCY;
+int sineAmplitude = SINE_AMPLITUDE;
 
 void setup() {
   Serial.begin(9600);
@@ -84,11 +99,13 @@ void loop() {
   handleIRRemote();
   
   // Handle oscillation modes with highest priority during oscillation
-  if ((snapOscillatingMode || slowOscillatingMode) && servoEnabled) {
+  if ((snapOscillatingMode || slowOscillatingMode || sineOscillatingMode) && servoEnabled) {
     if (snapOscillatingMode) {
       updateSnapOscillation();
     } else if (slowOscillatingMode) {
       updateSlowOscillation();
+    } else if (sineOscillatingMode) {
+      updateSineOscillation();
     }
     // Extra IR check during oscillation for responsiveness
     handleIRRemote(); 
@@ -97,7 +114,7 @@ void loop() {
   handleSerialCommands();
   
   // Reduce status printing frequency to minimize interference
-  if (millis() - lastPrintTime >= PRINT_INTERVAL && !snapOscillatingMode && !slowOscillatingMode) {
+  if (millis() - lastPrintTime >= PRINT_INTERVAL && !snapOscillatingMode && !slowOscillatingMode && !sineOscillatingMode) {
     printStatusInfo();
     lastPrintTime = millis();
   }
@@ -108,6 +125,60 @@ void loop() {
   }
   
   enforceServoSafety();
+}
+
+void updateSineOscillation() {
+  unsigned long currentTime = millis();
+  
+  // Check if it's time to update the sine position
+  if (currentTime - lastSineUpdate >= SINE_UPDATE_INTERVAL) {
+    // Calculate time elapsed since sine oscillation started
+    float timeElapsed = (currentTime - sineStartTime) / 1000.0; // Convert to seconds
+    
+    // Calculate sine wave value (-1 to 1)
+    float sineValue = sin(2 * PI * sineFrequency * timeElapsed);
+    
+    // Map sine value to servo angle
+    // sineValue ranges from -1 to 1
+    // We want to map this to SINE_CENTER ± SINE_AMPLITUDE
+    int targetAngle = SINE_CENTER + (int)(sineValue * sineAmplitude);
+    
+    // Constrain to valid servo range
+    targetAngle = constrain(targetAngle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+    
+    // Only update servo if position has changed significantly (reduces jitter)
+    if (abs(targetAngle - currentServoAngle) >= 1) {
+      currentServoAngle = targetAngle;
+      
+      if (servoAttached && servoEnabled) {
+        myServo.write(currentServoAngle);
+        
+        // Optional: Brief LED flash every full cycle
+        static float lastSineValue = 0;
+        if ((lastSineValue < 0 && sineValue >= 0) || (lastSineValue > 0 && sineValue <= 0)) {
+          digitalWrite(LED_BUILTIN, HIGH);
+          delayMicroseconds(10);
+          digitalWrite(LED_BUILTIN, LOW);
+        }
+        lastSineValue = sineValue;
+      }
+    }
+    
+    lastSineUpdate = currentTime;
+    
+    // Debug output every second
+    static unsigned long lastDebugPrint = 0;
+    if (currentTime - lastDebugPrint >= 1000) {
+      Serial.print(F("SINE: t="));
+      Serial.print(timeElapsed, 2);
+      Serial.print(F("s, sin="));
+      Serial.print(sineValue, 3);
+      Serial.print(F(", angle="));
+      Serial.print(currentServoAngle);
+      Serial.println(F("°"));
+      lastDebugPrint = currentTime;
+    }
+  }
 }
 
 void updateSnapOscillation() {
@@ -209,6 +280,12 @@ void handleSerialCommands() {
     if (command.startsWith("A")) {
       int angle = command.substring(1).toInt();
       setServoAngle(angle);
+    } else if (command.startsWith("FREQ")) {
+      float freq = command.substring(4).toFloat();
+      setSineFrequency(freq);
+    } else if (command.startsWith("AMP")) {
+      int amp = command.substring(3).toInt();
+      setSineAmplitude(amp);
     } else if (command == "LEFT") {
       moveServoLeft();
     } else if (command == "RIGHT") {
@@ -229,11 +306,85 @@ void handleSerialCommands() {
       toggleSnapOscillation();
     } else if (command == "SLOW") {
       toggleSlowOscillation();
+    } else if (command == "SINE") {
+      toggleSineOscillation();
     } else if (command == "DEBUG") {
       debugServo();
     } else if (command.length() > 0) {
-      Serial.println(F("Commands: A## (angle 0-180), LEFT, RIGHT, CENTER, TEST, STOP, IRCODES, ENABLE, DISABLE, SNAP, SLOW, DEBUG"));
+      Serial.println(F("Commands: A## (angle), FREQ# (Hz), AMP# (degrees), LEFT, RIGHT, CENTER"));
+      Serial.println(F("          TEST, STOP, IRCODES, ENABLE, DISABLE, SNAP, SLOW, SINE, DEBUG"));
     }
+  }
+}
+
+void setSineFrequency(float frequency) {
+  if (frequency > 0 && frequency <= 5.0) {
+    sineFrequency = frequency;
+    Serial.print(F("Sine frequency set to "));
+    Serial.print(sineFrequency, 2);
+    Serial.println(F(" Hz"));
+    
+    // Reset sine wave timing if currently oscillating
+    if (sineOscillatingMode) {
+      sineStartTime = millis();
+    }
+  } else {
+    Serial.println(F("Invalid frequency! Use 0.1 to 5.0 Hz"));
+  }
+}
+
+void setSineAmplitude(int amplitude) {
+  if (amplitude > 0 && amplitude <= 90) {
+    sineAmplitude = amplitude;
+    Serial.print(F("Sine amplitude set to ±"));
+    Serial.print(sineAmplitude);
+    Serial.println(F("° from center"));
+  } else {
+    Serial.println(F("Invalid amplitude! Use 1 to 90 degrees"));
+  }
+}
+
+void toggleSineOscillation() {
+  if (!servoEnabled) {
+    Serial.println(F("Servo is disabled - cannot oscillate"));
+    return;
+  }
+  
+  // Stop other oscillation modes if they're running
+  if (snapOscillatingMode) {
+    snapOscillatingMode = false;
+    Serial.println(F("Snap oscillation stopped"));
+  }
+  if (slowOscillatingMode) {
+    slowOscillatingMode = false;
+    Serial.println(F("Slow oscillation stopped"));
+  }
+  
+  if (sineOscillatingMode) {
+    sineOscillatingMode = false;
+    Serial.println(F("SINE OSCILLATION MODE OFF - Servo will hold current position"));
+    Serial.print(F("Current position: "));
+    Serial.print(currentServoAngle);
+    Serial.println(F("°"));
+    flashLED(3, 300);
+  } else {
+    sineOscillatingMode = true;
+    sineStartTime = millis();
+    lastSineUpdate = millis();
+    
+    Serial.println(F("SINE OSCILLATION MODE ON"));
+    Serial.print(F("Frequency: "));
+    Serial.print(sineFrequency, 2);
+    Serial.print(F(" Hz, Amplitude: ±"));
+    Serial.print(sineAmplitude);
+    Serial.print(F("°, Center: "));
+    Serial.print(SINE_CENTER);
+    Serial.println(F("°"));
+    Serial.print(F("Period: "));
+    Serial.print(1.0 / sineFrequency, 2);
+    Serial.println(F(" seconds"));
+    
+    flashLED(4, 150);
   }
 }
 
@@ -249,8 +400,22 @@ void debugServo() {
   Serial.println(snapOscillatingMode ? "YES" : "NO");
   Serial.print(F("Slow Oscillating: "));
   Serial.println(slowOscillatingMode ? "YES" : "NO");
+  Serial.print(F("Sine Oscillating: "));
+  Serial.println(sineOscillatingMode ? "YES" : "NO");
   
-  if (snapOscillatingMode || slowOscillatingMode) {
+  if (sineOscillatingMode) {
+    Serial.print(F("Sine Frequency: "));
+    Serial.print(sineFrequency, 2);
+    Serial.println(F(" Hz"));
+    Serial.print(F("Sine Amplitude: ±"));
+    Serial.print(sineAmplitude);
+    Serial.println(F("°"));
+    Serial.print(F("Sine Period: "));
+    Serial.print(1.0 / sineFrequency, 2);
+    Serial.println(F(" seconds"));
+  }
+  
+  if (snapOscillatingMode || slowOscillatingMode || sineOscillatingMode) {
     if (slowOscillatingMode) {
       Serial.print(F("Current Target: "));
       Serial.print(slowTargetAngle);
@@ -258,8 +423,10 @@ void debugServo() {
       Serial.print(F("Steps Remaining: "));
       Serial.println(abs(currentServoAngle - slowTargetAngle) / SLOW_STEP_SIZE);
     }
-    Serial.print(F("Current Position: "));
-    Serial.println(snapPosition ? "180° (100%)" : "0° (0%)");
+    if (snapOscillatingMode || slowOscillatingMode) {
+      Serial.print(F("Current Position: "));
+      Serial.println(snapPosition ? "180° (100%)" : "0° (0%)");
+    }
     if (snapOscillatingMode) {
       Serial.print(F("Next Move In: "));
       unsigned long timeLeft = SERVO_SETTLE_TIME - (millis() - lastServoCommand);
@@ -290,9 +457,10 @@ void setServoAngle(int angle) {
   
   if (angle >= SERVO_MIN_ANGLE && angle <= SERVO_MAX_ANGLE) {
     // Stop any oscillation when manually setting position
-    if (snapOscillatingMode || slowOscillatingMode) {
+    if (snapOscillatingMode || slowOscillatingMode || sineOscillatingMode) {
       snapOscillatingMode = false;
       slowOscillatingMode = false;
+      sineOscillatingMode = false;
       Serial.println(F("Oscillation mode stopped"));
     }
     
@@ -345,7 +513,7 @@ void handleIRRemote() {
     }
     
     // Show IR codes only when not oscillating to reduce serial spam
-    if (receivedCode != 0x0 && !snapOscillatingMode && !slowOscillatingMode) {
+    if (receivedCode != 0x0 && !snapOscillatingMode && !slowOscillatingMode && !sineOscillatingMode) {
       Serial.print(F("IR Code: 0x"));
       Serial.println(receivedCode, HEX);
     }
@@ -387,8 +555,14 @@ void handleIRRemote() {
         lastIRCommand = millis();
         break;
         
+      case IR_THREE:
+        Serial.println(F("IR: 3 - Toggling SINE oscillation (smooth sine wave)"));
+        toggleSineOscillation();
+        lastIRCommand = millis();
+        break;
+        
       default:
-        if (receivedCode != 0x0 && !snapOscillatingMode && !slowOscillatingMode) {
+        if (receivedCode != 0x0 && !snapOscillatingMode && !slowOscillatingMode && !sineOscillatingMode) {
           Serial.print(F("IR: Unknown code 0x"));
           Serial.println(receivedCode, HEX);
         }
@@ -405,10 +579,14 @@ void toggleSnapOscillation() {
     return;
   }
   
-  // Stop slow oscillation if it's running
+  // Stop other oscillation modes if they're running
   if (slowOscillatingMode) {
     slowOscillatingMode = false;
     Serial.println(F("Slow oscillation stopped"));
+  }
+  if (sineOscillatingMode) {
+    sineOscillatingMode = false;
+    Serial.println(F("Sine oscillation stopped"));
   }
   
   if (snapOscillatingMode) {
@@ -452,10 +630,14 @@ void toggleSlowOscillation() {
     return;
   }
   
-  // Stop snap oscillation if it's running
+  // Stop other oscillation modes if they're running
   if (snapOscillatingMode) {
     snapOscillatingMode = false;
     Serial.println(F("Snap oscillation stopped"));
+  }
+  if (sineOscillatingMode) {
+    sineOscillatingMode = false;
+    Serial.println(F("Sine oscillation stopped"));
   }
   
   if (slowOscillatingMode) {
@@ -509,6 +691,7 @@ void enableServo() {
     
     snapOscillatingMode = false;
     slowOscillatingMode = false;
+    sineOscillatingMode = false;
     servoMoving = false;
     currentServoAngle = SERVO_CENTER_ANGLE;
     myServo.write(SERVO_CENTER_ANGLE);
@@ -525,6 +708,7 @@ void disableServo() {
     servoEnabled = false;
     snapOscillatingMode = false;
     slowOscillatingMode = false;
+    sineOscillatingMode = false;
     servoMoving = false;
     
     if (servoAttached) {
@@ -547,6 +731,7 @@ void printIRCodes() {
   Serial.println(F("Power:       0xBA45FF00 (Toggle Enable/Disable)"));
   Serial.println(F("1:           0xF30CFF00 (Toggle SNAP Oscillation 0°<->180°)"));
   Serial.println(F("2:           0xE718FF00 (Toggle SLOW Oscillation 0°<->180° - Half Speed)"));
+  Serial.println(F("3:           0xE916FF00 (Toggle SINE Oscillation - Smooth Sine Wave)"));
   Serial.println(F("========================"));
 }
 
@@ -578,6 +763,10 @@ void printStatusInfo() {
   } else if (slowOscillatingMode) {
     Serial.print(F("SLOW OSCILLATING "));
     Serial.print(snapPosition ? "180°" : "0°");
+  } else if (sineOscillatingMode) {
+    Serial.print(F("SINE OSCILLATING "));
+    Serial.print(sineFrequency, 1);
+    Serial.print(F("Hz"));
   } else {
     Serial.print(F("HOLDING"));
   }
@@ -624,8 +813,10 @@ void testServo() {
   
   bool wasSnapping = snapOscillatingMode;
   bool wasSlow = slowOscillatingMode;
+  bool wasSine = sineOscillatingMode;
   snapOscillatingMode = false;
   slowOscillatingMode = false;
+  sineOscillatingMode = false;
   
   flashLED(3, 100);
   
@@ -647,6 +838,10 @@ void testServo() {
   } else if (wasSlow) {
     slowOscillatingMode = true;
     Serial.println(F("Slow oscillation restored"));
+  } else if (wasSine) {
+    sineOscillatingMode = true;
+    sineStartTime = millis(); // Reset sine wave timing
+    Serial.println(F("Sine oscillation restored"));
   }
   
   Serial.println(F("=== TEST COMPLETE ==="));
@@ -658,9 +853,20 @@ void printStartupInfo() {
   Serial.println(F("IR Remote Servo Controller - Enhanced"));
   Serial.println(F("Press '1' for Fast Oscillation (450ms)"));
   Serial.println(F("Press '2' for Slow Oscillation (900ms)"));
+  Serial.println(F("Press '3' for Sine Wave Oscillation"));
   Serial.println(F("====================================="));
-  Serial.println(F("Commands: LEFT, RIGHT, CENTER, SNAP, SLOW, DEBUG"));
+  Serial.println(F("Serial Commands:"));
+  Serial.println(F("SINE - Toggle sine oscillation"));
+  Serial.println(F("FREQ# - Set frequency (0.1-5.0 Hz)"));
+  Serial.println(F("AMP# - Set amplitude (1-90 degrees)"));
+  Serial.println(F("LEFT, RIGHT, CENTER, DEBUG"));
+  Serial.println(F("====================================="));
   Serial.println(F("Default: 90° (CENTER position)"));
+  Serial.print(F("Sine defaults: "));
+  Serial.print(SINE_FREQUENCY, 1);
+  Serial.print(F("Hz, ±"));
+  Serial.print(SINE_AMPLITUDE);
+  Serial.println(F("°"));
   Serial.println(F("====================================="));
 }
 
