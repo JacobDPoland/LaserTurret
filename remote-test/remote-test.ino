@@ -117,9 +117,10 @@ void updateSineOscillation() {
   if (currentTime - lastSineUpdate >= SINE_UPDATE_INTERVAL) {
     float timeElapsed = (currentTime - sineStartTime) / 1000.0;
     float sineValue = sin(2 * PI * sineFrequency * timeElapsed);
+    float cosineValue = cos(2 * PI * sineFrequency * timeElapsed);
     
     int targetServo1Angle = SINE_CENTER + (int)(sineValue * sineAmplitude);
-    int targetServo2Angle = SINE_CENTER + (int)(sineValue * sineAmplitude);
+    int targetServo2Angle = SINE_CENTER + (int)(cosineValue * sineAmplitude);
     
     targetServo1Angle = constrain(targetServo1Angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
     targetServo2Angle = constrain(targetServo2Angle, SERVO_MIN_ANGLE, SERVO2_MAX_ANGLE);
