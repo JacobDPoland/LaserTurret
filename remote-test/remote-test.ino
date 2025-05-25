@@ -30,7 +30,7 @@ const unsigned long PRINT_INTERVAL = 1000;
 
 // Oscillation timing constants
 const unsigned long SERVO_SETTLE_TIME = 450; // Time to wait for servo to reach position (ms) - full speed
-const unsigned long SERVO_SLOW_SETTLE_TIME = 900; // Time to wait for servo at half speed (ms)
+const unsigned long SERVO_SLOW_SETTLE_TIME = 927; // Time to wait for servo at half speed (ms)
 
 // Slow oscillation step control
 const int SLOW_STEP_SIZE = 2; // Degrees per step for smooth slow movement
@@ -54,6 +54,7 @@ bool snapPosition = true; // true = at 180°, false = at 0°
 // Slow oscillation variables
 int slowTargetAngle = SERVO_CENTER_ANGLE;
 unsigned long lastSlowStepTime = 0;
+unsigned long lastDirChange = 0;
 
 void setup() {
   Serial.begin(9600);
@@ -142,10 +143,16 @@ void updateSnapOscillation() {
 
 void updateSlowOscillation() {
   // Check if it's time to take the next step
-  if (millis() - lastSlowStepTime >= SLOW_STEP_DELAY) {
+  unsigned long currentTime = millis(); 
+  unsigned long deltaTime = currentTime - lastDirChange;
+  if (currentTime - lastSlowStepTime >= SLOW_STEP_DELAY) {
     
     // Check if we've reached the target position
     if (currentServoAngle == slowTargetAngle) {
+      Serial.print("SLOW: Time between direction change is ");
+      Serial.println(deltaTime);
+      lastDirChange = currentTime;
+
       // We've reached the target, time to set a new target in the opposite direction
       if (slowTargetAngle == SERVO_MAX_ANGLE) {
         // Currently at 180°, next target is 0°
