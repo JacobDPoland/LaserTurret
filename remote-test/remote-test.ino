@@ -31,6 +31,7 @@ const uint32_t IR_THREE = 0xA15EFF00;       // Triggers sine wave oscillation
 // Servo configuration constants
 const int SERVO_MIN_ANGLE = 0;    // 0% rotation
 const int SERVO_MAX_ANGLE = 180;  // 100% rotation
+const int SERVO2_MAX_ANGLE = 125; // Servo-2 maximum angle limit
 const int SERVO_CENTER_ANGLE = 90;
 const int SERVO_STEP_SIZE = 5;    // 5 degree increments for IR remote control
 
@@ -56,7 +57,6 @@ const int SINE_CENTER = 90; // Center position for sine wave
 // Core servo control variables
 Servo servo1;  // Servo-1 on pin 9
 Servo servo2;  // Servo-2 on pin 10
-int currentServoAngle = SERVO_CENTER_ANGLE;
 int currentServo1Angle = SERVO_CENTER_ANGLE;  // Individual servo 1 angle
 int currentServo2Angle = SERVO_CENTER_ANGLE;  // Individual servo 2 angle
 unsigned long lastBatteryCheck = 0;
@@ -71,10 +71,11 @@ bool servoEnabled = true;
 bool snapOscillatingMode = false;
 bool slowOscillatingMode = false;
 bool sineOscillatingMode = false;
-bool snapPosition = true; // true = at 180°, false = at 0°
+bool snapPosition = true; // true = at max position, false = at 0°
 
 // Slow oscillation variables
-int slowTargetAngle = SERVO_CENTER_ANGLE;
+int slowTargetServo1Angle = SERVO_CENTER_ANGLE;
+int slowTargetServo2Angle = SERVO_CENTER_ANGLE;
 unsigned long lastSlowStepTime = 0;
 unsigned long lastDirChange = 0;
 
@@ -116,7 +117,6 @@ void toggleSnapOscillation();
 void toggleSlowOscillation();
 void toggleSineOscillation();
 void toggleServo();
-void debugServo();
 void setSineFrequency(float frequency);
 void setSineAmplitude(int amplitude);
 void flashLED(int count, int delayTime);
@@ -138,7 +138,6 @@ void setup() {
   servoEnabled = true;
   servo1.write(SERVO_CENTER_ANGLE);
   servo2.write(SERVO_CENTER_ANGLE);
-  currentServoAngle = SERVO_CENTER_ANGLE;
   currentServo1Angle = SERVO_CENTER_ANGLE;
   currentServo2Angle = SERVO_CENTER_ANGLE;
   
@@ -193,23 +192,24 @@ void updateSineOscillation() {
     // Calculate sine wave value (-1 to 1)
     float sineValue = sin(2 * PI * sineFrequency * timeElapsed);
     
-    // Map sine value to servo angle
+    // Map sine value to servo angles
     // sineValue ranges from -1 to 1
     // We want to map this to SINE_CENTER ± SINE_AMPLITUDE
-    int targetAngle = SINE_CENTER + (int)(sineValue * sineAmplitude);
+    int targetServo1Angle = SINE_CENTER + (int)(sineValue * sineAmplitude);
+    int targetServo2Angle = SINE_CENTER + (int)(sineValue * sineAmplitude);
     
-    // Constrain to valid servo range
-    targetAngle = constrain(targetAngle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+    // Constrain to valid servo ranges
+    targetServo1Angle = constrain(targetServo1Angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+    targetServo2Angle = constrain(targetServo2Angle, SERVO_MIN_ANGLE, SERVO2_MAX_ANGLE);
     
-    // Only update servo if position has changed significantly (reduces jitter)
-    if (abs(targetAngle - currentServoAngle) >= 1) {
-      currentServoAngle = targetAngle;
-      currentServo1Angle = targetAngle;
-      currentServo2Angle = targetAngle;
+    // Only update servos if position has changed significantly (reduces jitter)
+    if (abs(targetServo1Angle - currentServo1Angle) >= 1 || abs(targetServo2Angle - currentServo2Angle) >= 1) {
+      currentServo1Angle = targetServo1Angle;
+      currentServo2Angle = targetServo2Angle;
       
       if (servo1Attached && servo2Attached && servoEnabled) {
-        servo1.write(currentServoAngle);
-        servo2.write(currentServoAngle);
+        servo1.write(currentServo1Angle);
+        servo2.write(currentServo2Angle);
         
         // Optional: Brief LED flash every full cycle
         static float lastSineValue = 0;
@@ -231,8 +231,10 @@ void updateSineOscillation() {
       Serial.print(timeElapsed, 2);
       Serial.print(F("s, sin="));
       Serial.print(sineValue, 3);
-      Serial.print(F(", angle="));
-      Serial.print(currentServoAngle);
+      Serial.print(F(", S1="));
+      Serial.print(currentServo1Angle);
+      Serial.print(F("°, S2="));
+      Serial.print(currentServo2Angle);
       Serial.println(F("°"));
       lastDebugPrint = currentTime;
     }
@@ -245,25 +247,27 @@ void updateSnapOscillation() {
     
     // Servo has settled, time to snap to the other position
     if (snapPosition) {
-      // Currently at 180°, snap to 0°
-      currentServoAngle = SERVO_MIN_ANGLE;
+      // Currently at max position, snap to 0°
       currentServo1Angle = SERVO_MIN_ANGLE;
       currentServo2Angle = SERVO_MIN_ANGLE;
       snapPosition = false;
-      Serial.println(F("SNAP: 180° -> 0%"));
+      Serial.println(F("SNAP: Max -> 0°"));
     } else {
-      // Currently at 0°, snap to 180°
-      currentServoAngle = SERVO_MAX_ANGLE;
+      // Currently at 0°, snap to max positions
       currentServo1Angle = SERVO_MAX_ANGLE;
-      currentServo2Angle = SERVO_MAX_ANGLE;
+      currentServo2Angle = SERVO2_MAX_ANGLE;  // Servo-2 limited to 125°
       snapPosition = true;
-      Serial.println(F("SNAP: 0° -> 100%"));
+      Serial.print(F("SNAP: 0° -> Max (S1="));
+      Serial.print(SERVO_MAX_ANGLE);
+      Serial.print(F("°, S2="));
+      Serial.print(SERVO2_MAX_ANGLE);
+      Serial.println(F("°)"));
     }
     
     // Send command to both servos and mark as moving
     if (servo1Attached && servo2Attached && servoEnabled) {
-      servo1.write(currentServoAngle);
-      servo2.write(currentServoAngle);
+      servo1.write(currentServo1Angle);
+      servo2.write(currentServo2Angle);
       servoMoving = true;
       lastServoCommand = millis();
       
@@ -281,48 +285,63 @@ void updateSlowOscillation() {
   unsigned long deltaTime = currentTime - lastDirChange;
   if (currentTime - lastSlowStepTime >= SLOW_STEP_DELAY) {
     
-    // Check if we've reached the target position
-    if (currentServoAngle == slowTargetAngle) {
+    // Check if we've reached the target positions
+    if (currentServo1Angle == slowTargetServo1Angle && currentServo2Angle == slowTargetServo2Angle) {
       Serial.print("SLOW: Time between direction change is ");
       Serial.println(deltaTime);
       lastDirChange = currentTime;
 
-      // We've reached the target, time to set a new target in the opposite direction
-      if (slowTargetAngle == SERVO_MAX_ANGLE) {
-        // Currently at 180°, next target is 0°
-        slowTargetAngle = SERVO_MIN_ANGLE;
+      // We've reached the targets, time to set new targets in the opposite direction
+      if (slowTargetServo1Angle == SERVO_MAX_ANGLE) {
+        // Currently at max positions, next targets are 0°
+        slowTargetServo1Angle = SERVO_MIN_ANGLE;
+        slowTargetServo2Angle = SERVO_MIN_ANGLE;
         snapPosition = false;
-        Serial.println(F("SLOW: Starting move 180° -> 0° (900ms)"));
+        Serial.println(F("SLOW: Starting move Max -> 0° (900ms)"));
       } else {
-        // Currently at 0°, next target is 180°
-        slowTargetAngle = SERVO_MAX_ANGLE;
+        // Currently at 0°, next targets are max positions
+        slowTargetServo1Angle = SERVO_MAX_ANGLE;
+        slowTargetServo2Angle = SERVO2_MAX_ANGLE;  // Servo-2 limited to 125°
         snapPosition = true;
-        Serial.println(F("SLOW: Starting move 0° -> 180° (900ms)"));
+        Serial.print(F("SLOW: Starting move 0° -> Max (S1="));
+        Serial.print(SERVO_MAX_ANGLE);
+        Serial.print(F("°, S2="));
+        Serial.print(SERVO2_MAX_ANGLE);
+        Serial.println(F("°) (900ms)"));
       }
     }
     
-    // Move one step closer to the target
-    if (currentServoAngle < slowTargetAngle) {
-      // Moving toward higher angle
-      currentServoAngle += SLOW_STEP_SIZE;
-      if (currentServoAngle > slowTargetAngle) {
-        currentServoAngle = slowTargetAngle; // Don't overshoot
+    // Move one step closer to the targets for each servo
+    // Servo 1 movement
+    if (currentServo1Angle < slowTargetServo1Angle) {
+      currentServo1Angle += SLOW_STEP_SIZE;
+      if (currentServo1Angle > slowTargetServo1Angle) {
+        currentServo1Angle = slowTargetServo1Angle; // Don't overshoot
       }
-    } else if (currentServoAngle > slowTargetAngle) {
-      // Moving toward lower angle
-      currentServoAngle -= SLOW_STEP_SIZE;
-      if (currentServoAngle < slowTargetAngle) {
-        currentServoAngle = slowTargetAngle; // Don't overshoot
+    } else if (currentServo1Angle > slowTargetServo1Angle) {
+      currentServo1Angle -= SLOW_STEP_SIZE;
+      if (currentServo1Angle < slowTargetServo1Angle) {
+        currentServo1Angle = slowTargetServo1Angle; // Don't overshoot
       }
     }
     
-    currentServo1Angle = currentServoAngle;
-    currentServo2Angle = currentServoAngle;
+    // Servo 2 movement
+    if (currentServo2Angle < slowTargetServo2Angle) {
+      currentServo2Angle += SLOW_STEP_SIZE;
+      if (currentServo2Angle > slowTargetServo2Angle) {
+        currentServo2Angle = slowTargetServo2Angle; // Don't overshoot
+      }
+    } else if (currentServo2Angle > slowTargetServo2Angle) {
+      currentServo2Angle -= SLOW_STEP_SIZE;
+      if (currentServo2Angle < slowTargetServo2Angle) {
+        currentServo2Angle = slowTargetServo2Angle; // Don't overshoot
+      }
+    }
     
-    // Send the new position to both servos
+    // Send the new positions to both servos
     if (servo1Attached && servo2Attached && servoEnabled) {
-      servo1.write(currentServoAngle);
-      servo2.write(currentServoAngle);
+      servo1.write(currentServo1Angle);
+      servo2.write(currentServo2Angle);
       lastSlowStepTime = millis();
       
       // Brief LED flash every 10 steps to show activity without being annoying
@@ -375,11 +394,9 @@ void handleSerialCommands() {
       toggleSlowOscillation();
     } else if (command == "SINE") {
       toggleSineOscillation();
-    } else if (command == "DEBUG") {
-      debugServo();
     } else if (command.length() > 0) {
       Serial.println(F("Commands: A## (angle), FREQ# (Hz), AMP# (degrees), LEFT, RIGHT, CENTER"));
-      Serial.println(F("          TEST, STOP, IRCODES, ENABLE, DISABLE, SNAP, SLOW, SINE, DEBUG"));
+      Serial.println(F("          TEST, STOP, IRCODES, ENABLE, DISABLE, SNAP, SLOW, SINE"));
     }
   }
 }
@@ -430,8 +447,10 @@ void toggleSineOscillation() {
   if (sineOscillatingMode) {
     sineOscillatingMode = false;
     Serial.println(F("SINE OSCILLATION MODE OFF - Both servos will hold current position"));
-    Serial.print(F("Current position: "));
-    Serial.print(currentServoAngle);
+    Serial.print(F("Current positions: S1="));
+    Serial.print(currentServo1Angle);
+    Serial.print(F("°, S2="));
+    Serial.print(currentServo2Angle);
     Serial.println(F("°"));
     flashLED(3, 300);
   } else {
@@ -450,78 +469,10 @@ void toggleSineOscillation() {
     Serial.print(F("Period: "));
     Serial.print(1.0 / sineFrequency, 2);
     Serial.println(F(" seconds"));
+    Serial.println(F("Note: Servo-2 limited to 125° maximum"));
     
     flashLED(4, 150);
   }
-}
-
-void debugServo() {
-  Serial.println(F("=== SERVO DEBUG INFO ==="));
-  Serial.print(F("Servo-1 Attached: "));
-  Serial.println(servo1Attached ? "YES" : "NO");
-  Serial.print(F("Servo-2 Attached: "));
-  Serial.println(servo2Attached ? "YES" : "NO");
-  Serial.print(F("Servos Enabled: "));
-  Serial.println(servoEnabled ? "YES" : "NO");
-  Serial.print(F("Current Angle (both): "));
-  Serial.println(currentServoAngle);
-  Serial.print(F("Servo-1 Angle: "));
-  Serial.println(currentServo1Angle);
-  Serial.print(F("Servo-2 Angle: "));
-  Serial.println(currentServo2Angle);
-  Serial.print(F("Snap Oscillating: "));
-  Serial.println(snapOscillatingMode ? "YES" : "NO");
-  Serial.print(F("Slow Oscillating: "));
-  Serial.println(slowOscillatingMode ? "YES" : "NO");
-  Serial.print(F("Sine Oscillating: "));
-  Serial.println(sineOscillatingMode ? "YES" : "NO");
-  
-  if (sineOscillatingMode) {
-    Serial.print(F("Sine Frequency: "));
-    Serial.print(sineFrequency, 2);
-    Serial.println(F(" Hz"));
-    Serial.print(F("Sine Amplitude: ±"));
-    Serial.print(sineAmplitude);
-    Serial.println(F("°"));
-    Serial.print(F("Sine Period: "));
-    Serial.print(1.0 / sineFrequency, 2);
-    Serial.println(F(" seconds"));
-  }
-  
-  if (snapOscillatingMode || slowOscillatingMode || sineOscillatingMode) {
-    if (slowOscillatingMode) {
-      Serial.print(F("Current Target: "));
-      Serial.print(slowTargetAngle);
-      Serial.println(F("°"));
-      Serial.print(F("Steps Remaining: "));
-      Serial.println(abs(currentServoAngle - slowTargetAngle) / SLOW_STEP_SIZE);
-    }
-    if (snapOscillatingMode || slowOscillatingMode) {
-      Serial.print(F("Current Position: "));
-      Serial.println(snapPosition ? "180° (100%)" : "0° (0%)");
-    }
-    if (snapOscillatingMode) {
-      Serial.print(F("Next Move In: "));
-      unsigned long timeLeft = SERVO_SETTLE_TIME - (millis() - lastServoCommand);
-      if (servoMoving && timeLeft > 0) {
-        Serial.print(timeLeft);
-        Serial.println(F(" ms (fast mode)"));
-      } else {
-        Serial.println(F("Ready to move"));
-      }
-    }
-  }
-  Serial.println(F("Forcing servo write to both servos..."));
-  
-  if (servo1Attached && servo2Attached) {
-    servo1.write(currentServo1Angle);
-    servo2.write(currentServo2Angle);
-    Serial.println(F("Servo write command sent to both servos"));
-  } else {
-    if (!servo1Attached) Serial.println(F("ERROR: Servo-1 not attached!"));
-    if (!servo2Attached) Serial.println(F("ERROR: Servo-2 not attached!"));
-  }
-  Serial.println(F("========================"));
 }
 
 void setServoAngle(int angle) {
@@ -539,9 +490,9 @@ void setServoAngle(int angle) {
       Serial.println(F("Oscillation mode stopped"));
     }
     
-    currentServoAngle = angle;
     currentServo1Angle = angle;
-    currentServo2Angle = angle;
+    // Constrain Servo-2 to its maximum limit
+    currentServo2Angle = constrain(angle, SERVO_MIN_ANGLE, SERVO2_MAX_ANGLE);
     
     // Ensure both servos are attached and write position
     if (!servo1Attached) {
@@ -557,9 +508,18 @@ void setServoAngle(int angle) {
     
     servo1.write(currentServo1Angle);
     servo2.write(currentServo2Angle);
-    Serial.print(F("Both servos moved to "));
-    Serial.print(currentServoAngle);
-    Serial.println(F("°"));
+    
+    if (currentServo1Angle == currentServo2Angle) {
+      Serial.print(F("Both servos moved to "));
+      Serial.print(currentServo1Angle);
+      Serial.println(F("°"));
+    } else {
+      Serial.print(F("Servos moved to S1="));
+      Serial.print(currentServo1Angle);
+      Serial.print(F("°, S2="));
+      Serial.print(currentServo2Angle);
+      Serial.println(F("° (S2 limited to 125°)"));
+    }
     flashLED(1, 100);
   } else {
     Serial.println(F("Invalid angle! Use 0-180"));
@@ -606,7 +566,7 @@ void setServo2Angle(int angle) {
     return;
   }
   
-  if (angle >= SERVO_MIN_ANGLE && angle <= SERVO_MAX_ANGLE) {
+  if (angle >= SERVO_MIN_ANGLE && angle <= SERVO2_MAX_ANGLE) {
     // Stop any oscillation when manually setting position
     if (snapOscillatingMode || slowOscillatingMode || sineOscillatingMode) {
       snapOscillatingMode = false;
@@ -630,7 +590,13 @@ void setServo2Angle(int angle) {
     Serial.println(F("°"));
     flashLED(1, 100);
   } else {
-    Serial.println(F("Invalid angle! Use 0-180"));
+    if (angle > SERVO2_MAX_ANGLE) {
+      Serial.print(F("Invalid angle! Servo-2 limited to 0-"));
+      Serial.print(SERVO2_MAX_ANGLE);
+      Serial.println(F("°"));
+    } else {
+      Serial.println(F("Invalid angle! Use 0-125"));
+    }
   }
 }
 
@@ -690,7 +656,7 @@ void adjustServo2(int degrees) {
   }
   
   int newAngle = currentServo2Angle + degrees;
-  newAngle = constrain(newAngle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+  newAngle = constrain(newAngle, SERVO_MIN_ANGLE, SERVO2_MAX_ANGLE);
   
   if (newAngle != currentServo2Angle) {
     currentServo2Angle = newAngle;
@@ -712,7 +678,13 @@ void adjustServo2(int degrees) {
   } else {
     Serial.print(F("Servo-2 at limit ("));
     Serial.print(currentServo2Angle);
-    Serial.println(F("°) - cannot adjust further"));
+    if (currentServo2Angle >= SERVO2_MAX_ANGLE) {
+      Serial.print(F("° - maximum "));
+      Serial.print(SERVO2_MAX_ANGLE);
+      Serial.println(F("°) - cannot adjust further"));
+    } else {
+      Serial.println(F("° - minimum 0°) - cannot adjust further"));
+    }
   }
 }
 
@@ -742,8 +714,8 @@ void moveServo1Right() {
 }
 
 void moveServo2Left() {
-  Serial.println(F("Moving Servo-2 to LEFT (180°) - 100%"));
-  setServo2Angle(SERVO_MAX_ANGLE);
+  Serial.println(F("Moving Servo-2 to LEFT (125°) - Maximum"));
+  setServo2Angle(SERVO2_MAX_ANGLE);
 }
 
 void moveServo2Right() {
@@ -766,32 +738,32 @@ void handleIRRemote() {
     }
     
     // Show IR codes only when not oscillating to reduce serial spam
-    // if (receivedCode != 0x0 && !snapOscillatingMode && !slowOscillatingMode && !sineOscillatingMode) {
-    //   Serial.print(F("IR Code: 0x"));
-    //   Serial.println(receivedCode, HEX);
-    // }
+    if (receivedCode != 0x0 && !snapOscillatingMode && !slowOscillatingMode && !sineOscillatingMode) {
+      Serial.print(F("IR Code: 0x"));
+      Serial.println(receivedCode, HEX);
+    }
     
     switch (receivedCode) {
       case IR_SKIP_LEFT:
-        // Serial.println(F("IR: Skip Left - Adjusting Servo-1 LEFT by 5°"));
+        Serial.println(F("IR: Skip Left - Adjusting Servo-1 LEFT by 5°"));
         adjustServo1(SERVO_STEP_SIZE);
         lastIRCommand = millis();
         break;
         
       case IR_SKIP_RIGHT:
-        // Serial.println(F("IR: Skip Right - Adjusting Servo-1 RIGHT by 5°"));
+        Serial.println(F("IR: Skip Right - Adjusting Servo-1 RIGHT by 5°"));
         adjustServo1(-SERVO_STEP_SIZE);
         lastIRCommand = millis();
         break;
         
       case IR_VOL_UP:
-        // Serial.println(F("IR: Vol Up - Adjusting Servo-2 LEFT by 5°"));
+        Serial.println(F("IR: Vol Up - Adjusting Servo-2 LEFT by 5°"));
         adjustServo2(SERVO_STEP_SIZE);
         lastIRCommand = millis();
         break;
         
       case IR_VOL_DOWN:
-        // Serial.println(F("IR: Vol Down - Adjusting Servo-2 RIGHT by 5°"));
+        Serial.println(F("IR: Vol Down - Adjusting Servo-2 RIGHT by 5°"));
         adjustServo2(-SERVO_STEP_SIZE);
         lastIRCommand = millis();
         break;
@@ -857,34 +829,39 @@ void toggleSnapOscillation() {
   if (snapOscillatingMode) {
     snapOscillatingMode = false;
     Serial.println(F("SNAP OSCILLATION MODE OFF - Both servos will hold current position"));
-    Serial.print(F("Current position: "));
-    Serial.print(currentServoAngle);
+    Serial.print(F("Current positions: S1="));
+    Serial.print(currentServo1Angle);
+    Serial.print(F("°, S2="));
+    Serial.print(currentServo2Angle);
     Serial.println(F("°"));
     flashLED(2, 200);
   } else {
     snapOscillatingMode = true;
     
-    // Determine starting position based on current angle
-    if (currentServoAngle >= SERVO_CENTER_ANGLE) {
-      // Start at 180° position
+    // Determine starting position based on current angles
+    int avgAngle = (currentServo1Angle + currentServo2Angle) / 2;
+    if (avgAngle >= SERVO_CENTER_ANGLE) {
+      // Start at max positions
       snapPosition = true;
-      currentServoAngle = SERVO_MAX_ANGLE;
       currentServo1Angle = SERVO_MAX_ANGLE;
-      currentServo2Angle = SERVO_MAX_ANGLE;
-      Serial.println(F("SNAP OSCILLATION MODE ON - Starting both servos at 180° (100%)"));
+      currentServo2Angle = SERVO2_MAX_ANGLE;  // Servo-2 limited to 125°
+      Serial.print(F("SNAP OSCILLATION MODE ON - Starting at Max (S1="));
+      Serial.print(SERVO_MAX_ANGLE);
+      Serial.print(F("°, S2="));
+      Serial.print(SERVO2_MAX_ANGLE);
+      Serial.println(F("°)"));
     } else {
       // Start at 0° position
       snapPosition = false;
-      currentServoAngle = SERVO_MIN_ANGLE;
       currentServo1Angle = SERVO_MIN_ANGLE;
       currentServo2Angle = SERVO_MIN_ANGLE;
-      Serial.println(F("SNAP OSCILLATION MODE ON - Starting both servos at 0° (0%)"));
+      Serial.println(F("SNAP OSCILLATION MODE ON - Starting both servos at 0°"));
     }
     
     // Move both servos to starting position immediately
     if (servo1Attached && servo2Attached) {
-      servo1.write(currentServoAngle);
-      servo2.write(currentServoAngle);
+      servo1.write(currentServo1Angle);
+      servo2.write(currentServo2Angle);
       servoMoving = true;
       lastServoCommand = millis();
     }
@@ -913,24 +890,33 @@ void toggleSlowOscillation() {
   if (slowOscillatingMode) {
     slowOscillatingMode = false;
     Serial.println(F("SLOW OSCILLATION MODE OFF - Both servos will hold current position"));
-    Serial.print(F("Current position: "));
-    Serial.print(currentServoAngle);
+    Serial.print(F("Current positions: S1="));
+    Serial.print(currentServo1Angle);
+    Serial.print(F("°, S2="));
+    Serial.print(currentServo2Angle);
     Serial.println(F("°"));
     flashLED(2, 400); // Longer flash for slow mode
   } else {
     slowOscillatingMode = true;
     
-    // Determine starting position and target based on current angle
-    if (currentServoAngle >= SERVO_CENTER_ANGLE) {
-      // Start moving toward 0° from current position
-      slowTargetAngle = SERVO_MIN_ANGLE;
+    // Determine starting position and targets based on current angles
+    int avgAngle = (currentServo1Angle + currentServo2Angle) / 2;
+    if (avgAngle >= SERVO_CENTER_ANGLE) {
+      // Start moving toward 0° from current positions
+      slowTargetServo1Angle = SERVO_MIN_ANGLE;
+      slowTargetServo2Angle = SERVO_MIN_ANGLE;
       snapPosition = false;
       Serial.println(F("SLOW OSCILLATION MODE ON - Moving both servos toward 0°"));
     } else {
-      // Start moving toward 180° from current position
-      slowTargetAngle = SERVO_MAX_ANGLE;
+      // Start moving toward max positions from current positions
+      slowTargetServo1Angle = SERVO_MAX_ANGLE;
+      slowTargetServo2Angle = SERVO2_MAX_ANGLE;  // Servo-2 limited to 125°
       snapPosition = true;
-      Serial.println(F("SLOW OSCILLATION MODE ON - Moving both servos toward 180°"));
+      Serial.print(F("SLOW OSCILLATION MODE ON - Moving toward Max (S1="));
+      Serial.print(SERVO_MAX_ANGLE);
+      Serial.print(F("°, S2="));
+      Serial.print(SERVO2_MAX_ANGLE);
+      Serial.println(F("°)"));
     }
     
     // Initialize timing
@@ -967,7 +953,6 @@ void enableServo() {
     slowOscillatingMode = false;
     sineOscillatingMode = false;
     servoMoving = false;
-    currentServoAngle = SERVO_CENTER_ANGLE;
     currentServo1Angle = SERVO_CENTER_ANGLE;
     currentServo2Angle = SERVO_CENTER_ANGLE;
     servo1.write(SERVO_CENTER_ANGLE);
@@ -1023,9 +1008,8 @@ void enforceServoSafety() {
     return;
   }
   
-  currentServoAngle = constrain(currentServoAngle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
   currentServo1Angle = constrain(currentServo1Angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
-  currentServo2Angle = constrain(currentServo2Angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+  currentServo2Angle = constrain(currentServo2Angle, SERVO_MIN_ANGLE, SERVO2_MAX_ANGLE);
   
   if ((!servo1Attached || !servo2Attached) && servoEnabled) {
     if (!servo1Attached) {
@@ -1122,7 +1106,7 @@ void testServo() {
   moveServoRight();
   delay(1000);
   
-  Serial.println(F("Testing both servos LEFT (180°)..."));
+  Serial.println(F("Testing both servos LEFT (Servo-1: 180°, Servo-2: 125°)..."));
   moveServoLeft();
   delay(1000);
   
@@ -1136,7 +1120,7 @@ void testServo() {
   moveServo1Right();
   delay(1000);
   
-  Serial.println(F("Testing Servo-2 individual control..."));
+  Serial.println(F("Testing Servo-2 individual control (0° to 125°)..."));
   moveServo2Left();
   delay(1000);
   moveServo2Right();
@@ -1165,10 +1149,10 @@ void testServo() {
 void printStartupInfo() {
   Serial.println(F("====================================="));
   Serial.println(F("Dual IR Remote Servo Controller"));
-  Serial.println(F("Servo-1: Pin 9 | Servo-2: Pin 10"));
+  Serial.println(F("Servo-1: Pin 9 (0-180°) | Servo-2: Pin 10 (0-125°)"));
   Serial.println(F("IR Remote Controls (5° increments):"));
   Serial.println(F("Skip Left/Right - Servo-1 ±5°"));
-  Serial.println(F("Vol Up/Down - Servo-2 ±5°"));
+  Serial.println(F("Vol Up/Down - Servo-2 ±5° (max 125°)"));
   Serial.println(F("Press '1' for Fast Oscillation (450ms)"));
   Serial.println(F("Press '2' for Slow Oscillation (900ms)"));
   Serial.println(F("Press '3' for Sine Wave Oscillation"));
@@ -1177,7 +1161,7 @@ void printStartupInfo() {
   Serial.println(F("SINE - Toggle sine oscillation"));
   Serial.println(F("FREQ# - Set frequency (0.1-5.0 Hz)"));
   Serial.println(F("AMP# - Set amplitude (1-90 degrees)"));
-  Serial.println(F("LEFT, RIGHT, CENTER, DEBUG"));
+  Serial.println(F("LEFT, RIGHT, CENTER"));
   Serial.println(F("====================================="));
   Serial.println(F("Default: 90° (CENTER position)"));
   Serial.print(F("Sine defaults: "));
@@ -1185,6 +1169,7 @@ void printStartupInfo() {
   Serial.print(F("Hz, ±"));
   Serial.print(SINE_AMPLITUDE);
   Serial.println(F("°"));
+  Serial.println(F("Note: Servo-2 limited to 125° maximum"));
   Serial.println(F("====================================="));
 }
 
