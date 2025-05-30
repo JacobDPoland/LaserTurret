@@ -26,10 +26,10 @@ const uint32_t IR_TWO = 0xE718FF00;         // Triggers slow oscillation at half
 const uint32_t IR_THREE = 0xA15EFF00;       // Triggers sine wave oscillation
 
 // Servo configuration constants
-const int SERVO_MIN_ANGLE = 65;
-const int SERVO_MAX_ANGLE = 120;
-const int SERVO2_MIN_ANGLE = 5;  // Servo-2 minimum angle limit
-const int SERVO2_MAX_ANGLE = 42; // Servo-2 maximum angle limit
+const int SERVO_MIN_ANGLE = 30;
+const int SERVO_MAX_ANGLE = 105;
+const int SERVO2_MIN_ANGLE = 0;  // Servo-2 minimum angle limit
+const int SERVO2_MAX_ANGLE = 15; // Servo-2 maximum angle limit
 // Calculate actual center angles for each servo
 const int SERVO1_CENTER_ANGLE = (SERVO_MIN_ANGLE + SERVO_MAX_ANGLE) / 2;  // 90° for 60-120 range
 const int SERVO2_CENTER_ANGLE = (SERVO2_MIN_ANGLE + SERVO2_MAX_ANGLE) / 2; 
