@@ -19,9 +19,18 @@ const uint32_t IR_VOL_DOWN = 0xEA15FF00;    // Servo y down (right)
 const uint32_t IR_POWER = 0xBA45FF00;       // Toggle servo enable/disable
 const uint32_t IR_ONE = 0xF30CFF00;         // Triggers circle pathh
 const uint32_t IR_TWO = 0xE718FF00;         // Triggers randomized sine frequency mode
+const uint32_t IR_THREE = 0xA15EFF00;
+const uint32_t IR_FOUR = 0xF708FF00;
+const uint32_t IR_FIVE = 0xE31CFF00;
+const uint32_t IR_SIX = 0xA55AFF00;
+const uint32_t IR_SEVEN = 0xBD42FF00;
+const uint32_t IR_EIGHT = 0xAD52FF00;
+const uint32_t IR_NINE = 0xB54AFF00;
+const uint32_t IR_ZERO = 0xE916FF00;
 
-const int SERVOX_MIN_ANGLE = 30;
-const int SERVOX_MAX_ANGLE = 105;
+
+const int SERVOX_MIN_ANGLE = 30;  // 30
+const int SERVOX_MAX_ANGLE = 105;  // 105
 const int SERVOY_MIN_ANGLE = 0;  
 const int SERVOY_MAX_ANGLE = 15; 
 
@@ -82,6 +91,8 @@ void loop() {
 void handleIRRemote() {
   if (IrReceiver.decode()) {
     uint32_t receivedCode = IrReceiver.decodedIRData.decodedRawData;
+    Serial.print("IR code: ");
+    Serial.println(receivedCode, HEX);
     
     switch (receivedCode) {
       case IR_SKIP_LEFT:
