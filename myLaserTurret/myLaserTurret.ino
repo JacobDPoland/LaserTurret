@@ -28,11 +28,11 @@ const uint32_t IR_EIGHT = 0xAD52FF00;
 const uint32_t IR_NINE = 0xB54AFF00;
 const uint32_t IR_ZERO = 0xE916FF00;
 
-
+// commented angles are optimal for the floor
 const int SERVOX_MIN_ANGLE = 30;  // 30
 const int SERVOX_MAX_ANGLE = 105;  // 105
-const int SERVOY_MIN_ANGLE = 0;  
-const int SERVOY_MAX_ANGLE = 15; 
+const int SERVOY_MIN_ANGLE = 0;  // 0
+const int SERVOY_MAX_ANGLE = 15;   // 15
 
 const int SERVOX_CENTER_ANGLE = (SERVOX_MIN_ANGLE + SERVOX_MAX_ANGLE) / 2;  
 const int SERVOY_CENTER_ANGLE = (SERVOY_MIN_ANGLE + SERVOY_MAX_ANGLE) / 2; 
@@ -40,6 +40,7 @@ const int SERVO_STEP_SIZE = 5;
 
 // Sine wave oscillation constants
 const unsigned long SINE_UPDATE_INTERVAL = 20;
+const unsigned long SINE_UPDATE_INTERVAL2 = 20;
 const int SINEX_AMPLITUDE = (SERVOX_MAX_ANGLE - SERVOX_MIN_ANGLE) / 2;       
 const int SINEY_AMPLITUDE = (SERVOY_MAX_ANGLE - SERVOY_MIN_ANGLE) / 2;  
 
@@ -52,6 +53,7 @@ int currentServoXAngle = SERVOX_CENTER_ANGLE;
 int currentServoYAngle = SERVOY_CENTER_ANGLE;
 bool servosEnabled = false;
 bool sineOscillatingMode = false;
+bool sineOscillatingMode2 = false;
 float sineFrequency = 0.25;
 unsigned long sineStartTime = 0;
 unsigned long lastSineUpdate = 0;
@@ -82,6 +84,8 @@ void loop() {
 
   if (sineOscillatingMode && servosEnabled) {
     updateSineOscillation();
+  } else if (sineOscillatingMode2 && servosEnabled) {
+    updateSineOscillation2();
   }
 
   enforceServoSafety();
@@ -91,8 +95,8 @@ void loop() {
 void handleIRRemote() {
   if (IrReceiver.decode()) {
     uint32_t receivedCode = IrReceiver.decodedIRData.decodedRawData;
-    Serial.print("IR code: ");
-    Serial.println(receivedCode, HEX);
+    // Serial.print("IR code: ");
+    // Serial.println(receivedCode, HEX);
     
     switch (receivedCode) {
       case IR_SKIP_LEFT:
@@ -117,6 +121,10 @@ void handleIRRemote() {
         
       case IR_ONE:
         toggleSineOscillation();
+        break;
+
+      case IR_TWO:
+        toggleSineOscillation2();
         break;
     }
     
@@ -152,6 +160,30 @@ void updateSineOscillation() {
   }
 }
 
+void updateSineOscillation2() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastSineUpdate >= SINE_UPDATE_INTERVAL2) {
+    float time_scale = 0.5;
+    float timeElapsed = (currentTime - sineStartTime) / 1000.0 * time_scale;
+    const float alpha = 3;
+    const float delta = PI / 2;
+    const float beta = 2;
+
+    float xValue = sin(alpha * timeElapsed + delta);
+    float yValue = sin(beta * timeElapsed);
+
+    int targetServoXAngle = SERVOX_CENTER_ANGLE + (int)(xValue * SINEX_AMPLITUDE);
+    int targetServoYAngle = SERVOY_CENTER_ANGLE + (int)(yValue * SINEY_AMPLITUDE);
+
+    targetServoXAngle = constrain(targetServoXAngle, SERVOX_MIN_ANGLE, SERVOX_MAX_ANGLE);
+    targetServoYAngle = constrain(targetServoYAngle, SERVOY_MIN_ANGLE, SERVOY_MAX_ANGLE);
+    servoX.write(targetServoXAngle);
+    servoY.write(targetServoYAngle);
+    
+    lastSineUpdate = currentTime;
+  }
+}
+
 void enableServos() {
   if (!servosEnabled) {
     servosEnabled = true;
@@ -169,6 +201,7 @@ void disableServos() {
   if (servosEnabled) {
     servosEnabled = false;
     sineOscillatingMode = false;
+    sineOscillatingMode2 = false;
   }
 }
 
@@ -240,6 +273,18 @@ void toggleSineOscillation() {
     sineOscillatingMode = false;
   } else {
     sineOscillatingMode = true;
+    sineStartTime = millis();
+    lastSineUpdate = millis();
+  }
+}
+
+void toggleSineOscillation2() {
+  if (!servosEnabled) return;
+  
+  if (sineOscillatingMode2) {
+    sineOscillatingMode2 = false;
+  } else {
+    sineOscillatingMode2 = true;
     sineStartTime = millis();
     lastSineUpdate = millis();
   }
